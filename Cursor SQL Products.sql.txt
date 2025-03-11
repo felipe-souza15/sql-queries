@@ -1,0 +1,79 @@
+-- Prevent extra messages from being sent to the client
+SET NOCOUNT ON;
+
+-- Declare variables
+DECLARE @ref VARCHAR(6), @i INT, @sql NVARCHAR(MAX);
+
+SET @i = 0;
+SET @ref = CONVERT(VARCHAR(6), GETDATE(), 112);
+
+-- Create a temporary table to store the results
+CREATE TABLE #F (
+    REF VARCHAR(8),
+    rubcod VARCHAR(5),
+    FRNCOD VARCHAR(3),
+    EMPCOD INT,
+    Mcfqtd INT,
+    VALOR MONEY
+);
+
+-- Loop through past months dynamically
+WHILE CONVERT(INT, @ref) > 202301
+BEGIN
+    -- If in the first 3 days of the current month, increment @i
+    IF (@ref = CONVERT(VARCHAR(6), GETDATE(), 112) AND DAY(GETDATE()) < 3)
+        SET @i = @i + 1;
+
+    -- Update reference for previous months
+    SET @REF = CONVERT(VARCHAR(6), DATEADD(MONTH, -@i, GETDATE()), 112);
+
+    -- Construct the dynamic SQL statement using sp_executesql
+    SET @sql =
+        N'INSERT INTO #F
+        SELECT 
+            @refParam AS Referencia,  -- Define the billing month reference
+            sercod + mcfdif AS rubcod, -- Unique product identifier
+            a.frncod, 
+            a.empcod, 
+            a.mcfqtd, 
+            a.mcfQtd * a.mcfPUn AS VALOR
+        FROM pre_fat..mcf' + @ref + '01 AS a (NOLOCK)
+        LEFT JOIN spcb..rub AS b ON a.serCod + a.mcfDif = b.rubCod + b.rubDif
+        WHERE mcfpun > 0  -- Exclude records where unit price is zero
+
+        UNION ALL
+
+        SELECT 
+            @refParam AS Referencia,  
+            rubcod + rubdif AS rubcod, 
+            b.frncod, 
+            a.empcod, 
+            a.deco_inqt_quantidade, 
+            a.deco_inqt_quantidade * a.deco_mnvl_faturado AS VALOR
+        FROM pre_fat..ut_DetalheConsumoMinimo' + @ref + '01 AS a
+        LEFT JOIN spcb..emp AS b ON a.empcod = b.empcod';  
+
+    -- Execute the dynamic SQL safely using sp_executesql  
+    EXEC sp_executesql @sql, N'@refParam VARCHAR(6)', @refParam = @ref;
+
+    -- Increment to process the next month
+    SET @i = @i + 1;
+END;
+
+-- Aggregate the results and ensure each product (rubcod) is represented uniquely
+SELECT 
+    CONVERT(DATE, SUBSTRING(REF, 1, 6) + '01', 112) AS Referencia,  -- Convert REF into a proper date format
+    rubcod,
+    FRNCOD AS CodFranquia,  
+    COUNT(DISTINCT EMPCOD) AS QtdClientes,  -- Count distinct clients using the product
+    SUM(MCFQTD) AS QtdProdutos,  -- Total quantity of products used
+    SUM(VALOR) AS VALOR  -- Total revenue generated
+FROM #F
+GROUP BY SUBSTRING(REF, 1, 6), FRNCOD, rubcod
+ORDER BY Referencia;
+
+-- Drop the temporary table after use
+DROP TABLE #F;
+
+-- Re-enable extra messages if needed
+SET NOCOUNT OFF;
